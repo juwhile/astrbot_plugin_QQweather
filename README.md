@@ -1,70 +1,66 @@
-[README.md](https://github.com/user-attachments/files/34509477/README.md)
 # astrbot_plugin_weather
 
-**AstrBot 天气查询插件** —— 复刻腾讯 QQ 官方天气小组件协议，查询当前城市天气与 7 天预报。
-
-> 不调用任何第三方天气 API，直接复刻 QQ 客户端自带的 `SsoGetWidgetWeather` 官方接口，逐字节对齐官方抓包。
-
-## 🎯 为什么稳定
-
-- **腾讯官方数据源** —— QQ 客户端自带的天气小组件天天在调，腾讯自己依赖，不会无故下线
-- **固定 5 字节请求**  —— 零参数、零变量，不会拼错，兼容性最强
-- **纯只读、零副作用** —— 不加好友、不进群、不改状态，不触发风控
-- **公共数据** —— 与好友/群/权限无关，服务器不会拒绝
-
-> 依赖：登录的 QQ 在线 + AstrBot/NapCat 运行 + 腾讯不改接口。三点缺一不可。
+AstrBot 天气查询插件 —— 复刻 QQ 官方天气小组件协议，自动定位并查询本地城市实时天气与未来预报。
 
 ## ✨ 功能
 
-发送 `天气`，返回：
+- **自动定位**：服务端根据发起请求的出口 IP 自动定位城市，无需指定城市
+- **实时天气**：城市名、天气状态、当前温度、最低温度
+- **详细指标**：湿度、风向、风力等级
+- **日出日落**：当日日出/日落时间
+- **数据更新时间**
+- **未来 7 天预报**：最高/最低温 + 中文天气词
 
-```
-江南·南宁天气：空气优 27℃（最低21℃）
-风力: 3-4级
-湿度: 97%
-风向: 东南风
-日出 06:54 / 日落 18:06
-更新: 11-07 07:26
-未来: 25℃/18℃ 小雨  27℃/21℃ 小雨  28℃/17℃ 小雨  23℃/13℃ 阴  22℃/13℃ 晴  24℃/14℃ 晴  25℃/17℃ 多云
-```
+## 🚀 原理（复刻官方协议）
 
-天气状态词由官方 CDN 图标文件名（`sunny.png` / `light_rain.png` / `overcast.png` 等）映射得到。
+直接复用 QQ 客户端自带的天气小组件接口，不走第三方公开天气 API：
+
+- **命令**：`trpc.qqweather.trpc_trpc_proxy.trpc_trpc_proxy.SsoGetWidgetWeather`
+- **请求（形态B）**：`20012A25...dec0`（带 IPv6，不带城市编码）
+- **定位机制**：服务端按发起请求的 socket 出口 IP 自动定位城市（实测：北京→北京、上海→上海、南宁→南宁）
+- **响应**：纯 protobuf，直接解析出全部天气字段
+
+> 官方客户端还会用形态A（显式城市编码 `08<编码>2001`）查询指定城市；本项目采用形态B自动定位，零参数。
 
 ## 📦 安装
 
-```bash
-cp -r astrbot_plugin_weather /path/to/AstrBot/data/plugins/
-sudo systemctl restart astrbot.service
-```
+1. 下载插件目录到 `AstrBot/data/plugins/astrbot_plugin_weather/`
+2. 重启 AstrBot
 
-或通过 AstrBot 管理面板上传 zip。
+## 🎮 使用
 
-## 🚀 使用
+**命令**：
 
 ```
 天气
 ```
 
-注册了 LLM 工具 `weather_query`，可让大模型直接调用查询天气。
+**LLM 工具**（AI 对话自动调用）：
 
-## ⚙️ 环境要求
+```python
+@filter.llm_tool(name="weather_query")
+async def weather_tool(self, event):
+    """查询本地城市(IP自动定位)的实时天气。"""
+```
 
-- AstrBot（支持 `send_packet` action 的适配器，如 `aiocqhttp` / NapCat / SnowLuma）
-- 已登录的 QQ 账号（借用登录会话向腾讯请求）
+## 🔧 环境要求
 
-## 📁 文件结构
+- AstrBot（支持 `send_packet` 的适配器，如 NapCat/SnowLuma）
+- QQ 账号在线
+
+## 📄 文件结构
 
 ```
 astrbot_plugin_weather/
-├── main.py          # 插件主体：协议构造 / 响应解析 / 命令与 LLM 工具
+├── main.py          # 插件主体
 ├── metadata.yaml    # 插件元信息
-└── README.md        # 本文件
+└── README.md        # 说明文档
 ```
 
-## ⚠️ 免责声明
+## 🛡️ 免责声明
 
-仅用于技术学习与研究。数据来自腾讯 QQ 官方协议，不存储、不转发任何用户数据，纯只读查询。请勿用于商业用途或违反腾讯服务条款。
+仅供学习研究使用，纯只读查询，不修改任何数据。请勿用于商业用途。
 
-## 📄 License
+## 📜 License
 
 MIT

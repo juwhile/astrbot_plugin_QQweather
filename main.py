@@ -3,14 +3,16 @@
 
 原理: 复刻官方天气小组件请求
   trpc.qqweather.trpc_trpc_proxy.trpc_trpc_proxy.SsoGetWidgetWeather
-（capture1.log line 230 实测, 请求固定 5 字节 08B9BC1B2001 =
-城市编码 450105 + 版本标记 1）。响应直接返回当前城市天气数据:
+（capture.log 2026-11-07 重新hook实测）。官方客户端交替使用两种形态:
+  形态A: 08 <varint(城市编码)> 20 01        显式指定城市
+  形态B: 20 01 2A 25 <IPv6字符串>           不带城市编码, 靠IP自动定位
+本项目采用【形态B】(IP自动定位)——服务端根据发起请求的 socket 出口IP
+定位城市, 无需传城市编码。响应直接返回定位城市的天气数据:
 城市名 / 温度 / 天气状态 / 高低温 / 湿度 / 风向 / 日出日落 / 未来预报。
 
 发送通道: aiocqhttp send_packet action（SnowLuma/NapCat）。
-用法: 天气
+暴露: LLM 工具 weather_query —— 返回本地城市(IP自动定位)的实时天气。
 """
-import re
 import time
 
 from astrbot.api.event import filter
@@ -31,16 +33,6 @@ def _uv(n: int) -> list:
         if not x:
             break
     return out
-
-
-def _fn(field: int, val: int) -> bytes:
-    return bytes(_uv((field << 3) | 0)) + bytes(_uv(val))
-
-
-def _fl(field: int, bs) -> bytes:
-    if isinstance(bs, str):
-        bs = bs.encode("utf-8")
-    return bytes(_uv((field << 3) | 2)) + bytes(_uv(len(bs))) + bytes(bs)
 
 
 def _pb_varint(buf: bytes, i: int):
@@ -90,9 +82,10 @@ def _num(vals):
     return int(v) if not isinstance(v, bytes) else None
 
 
-# ========== 请求构造（与官方实测一致, 固定 5 字节） ==========
-# f1 = 城市编码 450105(杭州), f4 = 1
-_WEATHER_REQ = bytes.fromhex("08B9BC1B2001")
+# ========== 请求构造（形态B: IP自动定位, 与官方实测一致） ==========
+# 官方实抓: 20012A25<IPv6字符串>  不带城市编码, 服务端按发起socket出口IP定位
+_IP_LOCATE_REQ = bytes.fromhex(
+    "20012A25323430653A3335303A3531323A323230303A373061613A653536623A623234623A64656330")
 
 # 天气 icon 文件名 → 中文状态词（来自官方 cdn weather-icon 目录）
 _ICON_TEXT = {
@@ -116,9 +109,10 @@ def _icon_to_text(icon: str) -> str:
 def _decode_weather(data: bytes) -> dict:
     """解析 SsoGetWidgetWeather 响应（capture1.log line 246 实测）:
     顶层 f1 = 城市对象 {
-      f1=区名(江南), f2=市名(南宁), f5=温度"25", f8={f2=天气状态"空气优"},
-      f9=日出"06:54", f10=日落"18:06", f13=天气词"多云", f14=湿度"86",
-      f15=风向"东风", f16=风力等级"3-4级",
+      f1=区名(江南), f2=市名(南宁), f5=温度"25", f6=最低温"21",
+      f8={f2=天气状态"空气优"}, f9=日出"06:54", f10=日落"18:06",
+      f12=更新时间戳, f13=天气词"多云", f14=湿度"86", f15=风向"东风",
+      f16=风力等级"3-4级",
       顶层 f3 = 未来预报[{f1=高, f2=低, f3=icon URL, f4=code}]
     }
     """
@@ -206,11 +200,12 @@ class WeatherPlugin(Star):
         super().__init__(context)
 
     async def _send_weather(self) -> bytes:
+        """发送形态B(IP自动定位)请求, 返回响应 bytes。"""
         client = self.context.get_platform("aiocqhttp").get_client()
         resp = await client.call_action(
             "send_packet",
             cmd="trpc.qqweather.trpc_trpc_proxy.trpc_trpc_proxy.SsoGetWidgetWeather",
-            data=_WEATHER_REQ.hex(), rsp=True)
+            data=_IP_LOCATE_REQ.hex(), rsp=True)
         data = resp.get("data", resp) if isinstance(resp, dict) else resp
         hex_body = ""
         if isinstance(data, str):
@@ -219,25 +214,14 @@ class WeatherPlugin(Star):
             hex_body = data.get("data", "") or data.get("responseData", "") or ""
         return bytes.fromhex(hex_body) if hex_body else b""
 
-    @filter.command("天气")
-    async def weather_cmd(self, event):
-        """查询当前城市天气（城市名/温度/天气状态/高低温/湿度/风向/日出日落/未来预报）。用法: 天气"""
-        try:
-            r = await self._send_weather()
-        except Exception as e:
-            yield event.plain_result(f"天气查询失败: {e}")
-            return
-        if not r:
-            yield event.plain_result("天气查询无响应（send_packet 可能未返回数据）")
-            return
-        d = _decode_weather(r)
-        logger.info(f"[CMD] 天气 city={d.get('city')} temp={d.get('temp')} "
-                    f"cond={d.get('cond')} hex={r.hex()[:200]}")
-        yield event.plain_result(_fmt_weather(d))
-
     @filter.llm_tool(name="weather_query")
     async def weather_tool(self, event):
-        """查询当前城市的实时天气，包括温度、天气状态、湿度、风向、高低温、日出日落。"""
+        """查询本地城市(IP自动定位)的实时天气。
+
+        返回: 城市名、天气状态、当前温度、最低温度、湿度、风向、风力、
+        日出/日落时间、数据更新时间、未来几天预报（高低温+天气词）。
+        由服务端根据发起请求的出口 IP 自动定位城市, 无需指定城市。
+        """
         try:
             r = await self._send_weather()
         except Exception as e:
@@ -247,4 +231,25 @@ class WeatherPlugin(Star):
         d = _decode_weather(r)
         if d.get("err"):
             return f"天气解析失败: {d['err']}"
+        logger.info(f"[TOOL] weather city={d.get('city')} temp={d.get('temp')} "
+                    f"cond={d.get('cond')} hex={r.hex()[:200]}")
         return _fmt_weather(d)
+
+    @filter.command("天气")
+    async def weather_cmd(self, event):
+        """查询本地城市(IP自动定位)的实时天气。用法: 天气"""
+        try:
+            r = await self._send_weather()
+        except Exception as e:
+            yield event.plain_result(f"天气查询失败: {e}")
+            return
+        if not r:
+            yield event.plain_result("天气查询无响应（send_packet 可能未返回数据）")
+            return
+        d = _decode_weather(r)
+        if d.get("err"):
+            yield event.plain_result(f"天气解析失败: {d['err']}")
+            return
+        logger.info(f"[CMD] 天气 city={d.get('city')} temp={d.get('temp')} "
+                    f"cond={d.get('cond')} hex={r.hex()[:200]}")
+        yield event.plain_result(_fmt_weather(d))
