@@ -1,0 +1,5 @@
+name: astrbot_plugin_weather
+desc: 查询当前城市天气（温度/天气状态/湿度/风向/风力/日出日落/未来7天预报），复刻官方天气小组件 SsoGetWidgetWeather 请求
+version: 1.0.0
+author: SnowLuma
+repo: https://github.com/SnowLuma/astrbot_plugin_weather
